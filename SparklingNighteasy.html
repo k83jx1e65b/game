@@ -1,0 +1,426 @@
+﻿<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sparkling Night by Udio - Rhythm Game (Super Easy)</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #0d0d11;
+            color: white;
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #songTitle {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+            background: linear-gradient(45deg, #ff007f, #fff700, #7fff00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 20px rgba(255, 247, 0, 0.2);
+        }
+        #gameCanvas {
+            background: linear-gradient(to bottom, #000005 0%, #0a0a14 70%, #151525 100%);
+            border-radius: 10px;
+            box-shadow: 0 0 30px rgba(127, 255, 0, 0.05);
+        }
+        #info {
+            margin-top: 15px;
+            text-align: center;
+            line-height: 1.8;
+            font-size: 16px;
+            font-weight: bold;
+            background: rgba(20, 20, 30, 0.8);
+            padding: 15px 30px;
+            border-radius: 8px;
+            border: 1px solid #222233;
+        }
+        .key-box {
+            display: inline-block;
+            width: 24px;
+            text-align: center;
+            background: #252535;
+            border: 1px solid #555;
+            border-radius: 4px;
+            color: #fff;
+            padding: 1px 4px;
+            margin-right: 8px;
+            font-family: monospace;
+        }
+        .start-ui { color: #00ffff; text-shadow: 0 0 8px #00ffff; }
+        .pink-ui { color: #ff007f; text-shadow: 0 0 8px #ff007f; }
+        .lemon-ui { color: #fff700; text-shadow: 0 0 8px #fff700; }
+        .lime-ui { color: #7fff00; text-shadow: 0 0 8px #7fff00; }
+        .reset-ui { color: #ff4757; text-shadow: 0 0 8px #ff4757; }
+        
+        #statusDisplay {
+            font-size: 14px;
+            color: #888899;
+            margin-top: 10px;
+            font-weight: normal;
+        }
+        #scoreDisplay {
+            font-size: 18px;
+            color: #ffffff;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="songTitle">♪ Sparkling Night by Udio</div>
+
+    <canvas id="gameCanvas" width="500" height="550"></canvas>
+    
+    <div id="info">
+        <div id="scoreDisplay">Score: 0 | Combo: 0</div>
+        <div><span class="key-box">Z</span><span class="start-ui">ゲームスタート</span></div>
+        <div><span class="key-box">X</span><span class="pink-ui">左レーン （ 蛍光ピンク ）</span></div>
+        <div><span class="key-box">C</span><span class="lemon-ui">真中レーン （ 蛍光レモン ）</span></div>
+        <div><span class="key-box">V</span><span class="lime-ui">右レーン （ 蛍光黄緑 ）</span></div>
+        <div><span class="key-box">R</span><span class="reset-ui">リセット</span></div>
+        <div id="statusDisplay">音楽ファイルを読み込み中...</div>
+    </div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreDisplay = document.getElementById('scoreDisplay');
+const statusDisplay = document.getElementById('statusDisplay');
+
+const AUDIO_URL = '202607010413097fa.mp3';
+
+const LANES_COUNT = 3;
+const JUDGE_LINE_Y = 470; 
+
+// ★【さらに遅く】ノーツの速度（3.5 ? 2.3 に落として超スローに）
+const NOTE_SPEED = 2.3;     
+
+// ★【当たり判定を太く】判定の許容幅を2倍（45 ? 90ピクセルに拡大！かなりズレてもHITになります）
+const HIT_RANGE = 90;     
+
+const LANE_COLORS = [
+    { base: '#ff007f', glow: 'rgba(255, 0, 127, 0.8)' },  
+    { base: '#fff700', glow: 'rgba(255, 247, 0, 0.8)' },  
+    { base: '#7fff00', glow: 'rgba(127, 255, 0, 0.8)' }   
+];
+
+let audioCtx = null;
+let audioBuffer = null;
+let audioSource = null;
+let analyser = null;
+let freqData = null;
+
+let isPlaying = false;
+let score = 0;
+let combo = 0;
+let notes = [];      
+let particles = [];  
+let hitEffects = []; 
+
+let lastNoteTime = 0;
+const MIN_NOTE_INTERVAL = 550; // 間隔をさらに少し広げました
+const BEAT_THRESHOLD = 200;    // よりはっきりした音だけ拾うように調整
+
+const KEYS = {
+    'z': 'start', 'Z': 'start', 'つ': 'start', 'っ': 'start',
+    'r': 'reset', 'R': 'reset', 'す': 'reset',
+    'x': 0, 'X': 0, 'さ': 0,
+    'c': 1, 'C': 1, 'そ': 1,
+    'v': 2, 'V': 2, 'ひ': 2
+};
+
+const VANISH_X = canvas.width / 2;
+const VANISH_Y = 100; 
+
+async function loadAudio() {
+    try {
+        const response = await fetch(AUDIO_URL);
+        if (!response.ok) throw new Error();
+        audioBuffer = await response.arrayBuffer();
+        statusDisplay.textContent = "【ロード完了】画面を1回クリックしたあと【Z】キーでスタート！";
+        statusDisplay.style.color = "#00ffcc";
+    } catch (e) {
+        statusDisplay.textContent = "曲が見つかりません。同じフォルダに置いてください。";
+        statusDisplay.style.color = "#ff4757";
+    }
+}
+
+async function startGame() {
+    if (isPlaying) return;
+    if (!audioBuffer) return;
+
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    statusDisplay.textContent = "解析中...";
+    try {
+        const decodedBuffer = await audioCtx.decodeAudioData(audioBuffer.slice(0));
+        audioSource = audioCtx.createBufferSource();
+        audioSource.buffer = decodedBuffer;
+        
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 64; 
+        
+        audioSource.connect(analyser);
+        analyser.connect(audioCtx.destination);
+        freqData = new Uint8Array(analyser.frequencyBinCount);
+
+        notes = [];
+        particles = [];
+        hitEffects = [];
+        score = 0;
+        combo = 0;
+        updateUI();
+
+        audioSource.start(0);
+        isPlaying = true;
+        statusDisplay.textContent = "演奏中 ??";
+        statusDisplay.style.color = "#fff700";
+
+        audioSource.onended = () => {
+            statusDisplay.textContent = "終了しました！【R】キーでリセットできます。";
+            statusDisplay.style.color = "#00ffff";
+            isPlaying = false;
+        };
+
+        requestAnimationFrame(gameLoop);
+    } catch (error) {
+        statusDisplay.textContent = "デコードエラーが発生しました。";
+        console.error(error);
+    }
+}
+
+function resetGame() {
+    if (audioSource) { try { audioSource.stop(); } catch(e){} }
+    notes = [];
+    particles = [];
+    hitEffects = [];
+    score = 0;
+    combo = 0;
+    isPlaying = false;
+    updateUI();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    statusDisplay.textContent = "リセットしました。【Z】キーでいつでもスタート！";
+    statusDisplay.style.color = "#00ffff";
+}
+
+function getPerspectivePos(lane, y) {
+    const progress = y / canvas.height;
+    const startWidth = 50;  
+    const endWidth = 420;   
+    const currentWidth = startWidth + (endWidth - startWidth) * progress;
+    
+    const screenX = VANISH_X + (lane - 1) * (currentWidth / 3);
+    const screenY = VANISH_Y + (canvas.height - VANISH_Y) * progress;
+    const size = 6 + 28 * progress; 
+    
+    return { x: screenX, y: screenY, size: size };
+}
+
+function analyzeAudio() {
+    if (!analyser) return;
+    analyser.getByteFrequencyData(freqData);
+
+    const bassEnergy = (freqData[1] + freqData[2] + freqData[3]) / 3;
+    const currentTime = performance.now();
+
+    if (bassEnergy > BEAT_THRESHOLD && (currentTime - lastNoteTime) > MIN_NOTE_INTERVAL) {
+        const randomLane = Math.floor(Math.random() * LANES_COUNT);
+        notes.push({ lane: randomLane, y: 0, hit: false });
+        lastNoteTime = currentTime;
+    }
+}
+
+function createExplosion(lane) {
+    const pos = getPerspectivePos(lane, JUDGE_LINE_Y);
+    const color = LANE_COLORS[lane].base;
+    
+    for (let i = 0; i < 20; i++) { // 派手さをアップ（15 ? 20粒）
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 5 + 2;
+        particles.push({
+            x: pos.x,
+            y: pos.y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            radius: Math.random() * 3 + 2.5,
+            alpha: 1,
+            color: color
+        });
+    }
+
+    hitEffects.push({
+        x: pos.x,
+        y: pos.y - 45,
+        alpha: 1,
+        color: color
+    });
+}
+
+function gameLoop() {
+    if (!isPlaying) return;
+
+    analyzeAudio();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    drawBackground();
+
+    for (let i = notes.length - 1; i >= 0; i--) {
+        let note = notes[i];
+        note.y += NOTE_SPEED;
+
+        const pos = getPerspectivePos(note.lane, note.y);
+
+        if (!note.hit) {
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = LANE_COLORS[note.lane].base;
+            
+            let grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, pos.size);
+            grad.addColorStop(0, '#ffffff');
+            grad.addColorStop(0.3, LANE_COLORS[note.lane].base);
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, pos.size, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+            
+            ctx.shadowBlur = 0; 
+        }
+
+        if (note.y > canvas.height && !note.hit) {
+            notes.splice(i, 1);
+            combo = 0; 
+            updateUI();
+        }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.alpha -= 0.03; 
+
+        if (p.alpha <= 0) {
+            particles.splice(i, 1);
+            continue;
+        }
+
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = p.color;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    for (let i = hitEffects.length - 1; i >= 0; i--) {
+        let h = hitEffects[i];
+        h.y -= 0.5; 
+        h.alpha -= 0.02;
+
+        if (h.alpha <= 0) {
+            hitEffects.splice(i, 1);
+            continue;
+        }
+
+        ctx.save();
+        ctx.globalAlpha = h.alpha;
+        ctx.font = "italic bold 32px sans-serif"; // 文字も少し大きく
+        ctx.fillStyle = "#ffffff";
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = h.color;
+        ctx.textAlign = "center";
+        ctx.fillText("HIT!", h.x, h.y);
+        ctx.restore();
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+function drawBackground() {
+    const leftEdge = getPerspectivePos(0, JUDGE_LINE_Y);
+    const rightEdge = getPerspectivePos(2, JUDGE_LINE_Y);
+    
+    // ★【判定線の極太化】線の太さをアップ（lineWidth: 4 ? 10 に、光のブラーも 10 ? 20 へ）
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.lineWidth = 10;
+    ctx.shadowBlur = 20;
+    ctx.shadowColor = '#00ffff';
+    ctx.beginPath();
+    ctx.moveTo(leftEdge.x - 40, leftEdge.y);
+    ctx.lineTo(rightEdge.x + 40, rightEdge.y);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i <= LANES_COUNT; i++) {
+        const topPos = getPerspectivePos(i - 0.5, 0);
+        const bottomPos = getPerspectivePos(i - 0.5, canvas.height);
+        ctx.beginPath();
+        ctx.moveTo(topPos.x, topPos.y);
+        ctx.lineTo(bottomPos.x, bottomPos.y);
+        ctx.stroke();
+    }
+}
+
+function judgeKey(lane) {
+    if (!isPlaying) return;
+
+    let targetNote = null;
+    let minDiff = Infinity;
+
+    for (let note of notes) {
+        if (note.lane === lane && !note.hit) {
+            let diff = Math.abs(note.y - JUDGE_LINE_Y);
+            if (diff < minDiff) {
+                minDiff = diff;
+                targetNote = note;
+            }
+        }
+    }
+
+    if (targetNote && minDiff < HIT_RANGE) {
+        targetNote.hit = true; 
+        score += 100 + combo; 
+        combo++;
+        createExplosion(lane); 
+    }
+    updateUI();
+}
+
+function updateUI() {
+    scoreDisplay.textContent = `Score: ${score} | Combo: ${combo}`;
+}
+
+window.addEventListener('keydown', (e) => {
+    const action = KEYS[e.key];
+    if (action === undefined) return;
+
+    if (action === 'start') {
+        startGame();
+    } else if (action === 'reset') {
+        resetGame();
+    } else if (typeof action === 'number') {
+        judgeKey(action);
+    }
+});
+
+loadAudio();
+</script>
+</body>
+</html>
